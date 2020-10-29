@@ -18,16 +18,18 @@ import datetime
 import argparse
 import tensorflow as tf
 from tensorflow.keras.optimizers import Adam
-import faulthandler
-faulthandler.enable()
+
 def powerset(iterable):
+    """Return a powerset of the given iterable, treating the iterable as a set"""
+
     s = list(iterable)
     tuples = chain.from_iterable(combinations(s, r) for r in range(1, len(s)+1))
     lists = map(lambda x: list(x), tuples)
     return list(lists)
 
-# Appends the channel postfix to the given sensors
 def sensors_to_channels(sensor_list):
+    """Append the channel postfix to the given sensors"""
+
     channels = []
     for sensor in sensor_list:
         channels.append(sensor + "_A_x")
@@ -39,10 +41,15 @@ def sensors_to_channels(sensor_list):
     return channels
 
 
-# Generates a real-valued prediction via a probability-weighted sum of classes
-def classToRiskMapArrReduced(arr):
+def classToRiskMapArrReduced(probs):
+    """Generate a real-valued prediction via a probability-weighted sum of classes
+
+    Arguments:
+    probs   -- the probabilities predicted by the model
+    """
+
     result = []
-    for el in arr:
+    for el in probs:
         tot = 0
         for idx, cell in enumerate(el):
             tot += (idx + 1) * cell
@@ -50,16 +57,31 @@ def classToRiskMapArrReduced(arr):
     return result
 
 def leave_one_out_split(data_set, person):
+    """Split the dataset so that one person's trials are held out for testing
+    
+    Arguments:
+    data_set    -- the DataFrame with every person's trials
+    person      -- the person to leave out of training, 1 to 10
+
+    Returns:
+    (train, test, val)  -- tuple of DataFrames for model consumption. trian/val contain all subjects
+                           other than the one in test
     """
-    Assumes that each person in the data (a DataFrame) has the same amount of trials.
-    Chooses a range to use for testing and returns the rest as training.
-    Returns a tuple of two DataFrame: (train, test)
-    """
+
     for_training = data_set.loc[data_set['person'] != person]
     train, val = train_test_split(for_training, test_size=0.3, stratify=for_training.loc[:, 'class_label'])
     return (train, data_set.loc[data_set['person'] == person], val)
 
 def k_fold(data_set, lo, hi):
+    """Partition the dataset into folds, where each fold contains
+       contains (train, test, val) where a given subject is left out
+
+    Arguments:
+    data_set    -- DataFrame containing trials for each subject
+    lo          -- subject left out of training in the first fold, generally 1
+    hi          -- subject left out of training in the last fold, generally the number of subjects in the data
+    """
+
     folds = []
     # Remove person 4 due to misaligned sensors
     data_set = data_set.loc[data_set['person'] != 4]
@@ -69,6 +91,13 @@ def k_fold(data_set, lo, hi):
     return folds
     
 def simple_split(data_set, percentage_test=0.3, num_trials=1):
+    """Split the dataset into train, test, validate sets
+
+    Arguments:
+    data_set    -- DataFrame with each trial
+    percentage_test -- percentage of the dataset to hold back for testing and validation
+    num_trials      -- number of folds to create, for symmetry with k-folds splitting
+    """
     folds = []
     for i in range(num_trials):
         train, test = train_test_split(data_set, test_size=percentage_test, stratify=data_set.loc[:, 'class_label'])
@@ -77,14 +106,26 @@ def simple_split(data_set, percentage_test=0.3, num_trials=1):
     return folds
 
 def getclasses():
+    """Get class labels in order for each trial"""
+
     csv = pd.read_csv('./metadata/lift_times_untrimmed.csv')
     return pd.DataFrame(csv)['class_label']
 
 def getpeople():
+    """Get subject labels in order for each trial"""
+
     csv = pd.read_csv('./metadata/lift_times_untrimmed.csv')
     return pd.DataFrame(csv)['person']
 
 def createFeatures(sheets, classes):
+    """Create a DataFrame with a 'data' and 'class_label' columns, where
+       each row is a single trial
+
+    Arguments:
+    sheets  -- array of trials, where each element is the IMU data for that trial
+    classes -- array of class labels for each trial
+    """
+
     agged = pd.DataFrame(columns=['data'])
 
     for i in range(len(sheets)):
@@ -96,9 +137,27 @@ def createFeatures(sheets, classes):
 
             
 def keras_class_conversion(vec, n_classes):
+    """Perform one-hot embeddings for the given vector of real values
+
+    Arguments:
+    vec         -- vector of class labels from 1 to n_classes
+    n_classes   -- number of classes, sets the dimension of the embedding
+    """
+
     return np.array(list(map(lambda x: [1 if i == x - 1 else 0 for i in range(n_classes)], vec)))
 
-def get_data(trim, end, allowed_sensors, preprocessing=None, simple=False, test_split = 0.25, count=1, save=False):
+def get_data(trim, end, allowed_sensors, simple=False, test_split = 0.25, count=1):
+    """Load data and format it into folds of (train, test, val) for use in model
+
+    Arguments:
+    trim    -- offset from start of lift. use 'min' to start at beginning of trial
+    end     -- length from start of data to end. use 'max' to go until end of trial, padding short trials
+    allowed_sensors -- list of channels to keep, identified by their labels such as RtWt_A_x
+    simple          -- whether or not to use a simple split rather than cross-validation (default False)
+    test_split      -- test set percentage if using simple split (default 0.25)
+    count           -- number of folds if using simple split (default 1)
+    """
+
     # frame length of each trial. May not have enough for values > 150.
     offset = end
     # position to start from. Some trials have nothing before the lift and so break.
@@ -144,9 +203,24 @@ def get_data(trim, end, allowed_sensors, preprocessing=None, simple=False, test_
 
     return folds
 
-
-# Train a model on one fold of data
 def train_model_fold(train_data, val_data, model_name, epochs, model_num=0, batch_size=32, use_keras=False, kernel=5, test_name='test', lr=0.001, reg=0.01, dropout=0.5):
+    """Train a model on one fold of data
+
+    Arguments:
+    train_data  -- DataFrame with columns 'data' and 'class_label'
+    val_data    -- DataFrame with same format as train_data, to use for validation
+    model_name  -- type of model to train. must be name of a model defined in models.py
+    epochs      -- maximum number of epochs to train for. may terminate before this due to early stopping
+    model_num   -- identifies which model this is, since we train a different model for each fold
+    batch_size  -- batch size for model training (default 32)
+    use_keras   -- whether or not to keras library for models instead of tensorflow. required for generating saliency maps
+    kernel      -- kernel size for Conv1D layers
+    test_name   -- name of the current test run. used for labeling, files, etc
+    lr      -- learning rate for Adam optimizer (default 0.0001)
+    reg     -- regularization parameter (default 0.001)
+    dropout -- dropout percentage (default 0.5)
+    """
+    
     X_train = train_data.loc[:, 'data']
     X_train = np.stack([x for x in X_train]) # extract from dataframe and stack into samples
     y_train = keras_class_conversion(train_data.loc[:, 'class_label'], 4) # one-hot embedding
@@ -179,6 +253,20 @@ def train_model_fold(train_data, val_data, model_name, epochs, model_num=0, batc
 
 # Test a trained model on one fold of data
 def test_model_fold(test_data, model, batch_size=32):
+    """Test a trained model on one fold of data
+
+    Arguments:
+    test_data   -- DataFrame with columns 'data' and 'class_label'
+    model       -- the trained model to use for testing
+    batch_size  -- the batch size (default 32)
+    
+    Returns a dict with values:
+    pred_mapped         -- class predictions, 1-4
+    pred_prob_mapped    -- real-valued predictions based on probability weighting
+    actual              -- actual class labels
+    mat                 -- confusion matrix with rows as actual and columns as predictions
+    """
+
     X_test = test_data.loc[:, 'data']
     X_test = np.stack([x for x in X_test])
     y_test = keras_class_conversion(test_data.loc[:, 'class_label'],4) # one-hot embedding
@@ -198,14 +286,27 @@ def test_model_fold(test_data, model, batch_size=32):
             'mat': mat}
 
 # Trains a model for every fold of data and compiles results
-def train_all(folds, model_name, epochs, use_keras=False, kernel=5, test_name='test', lr=1e-5, reg=0.01, dropout=0.25, model_loaded=None):
+def train_all(folds, model_name, epochs, use_keras=False, kernel=5, test_name='test', lr=1e-5, reg=0.01, dropout=0.25):
+    """Train a model for every fold of data and compile results
+
+    Arguments:
+    folds   -- list of tuples, where each tuple is data of the form (train, test, val)
+    model_name  -- type of model to train. must be name of a model defined in models.py
+    epochs      -- maximum number of epochs to train for. may terminate before this due to early stopping
+    use_keras   -- whether or not to keras library for models instead of tensorflow. required for generating saliency maps
+    kernel      -- kernel size for Conv1D layers
+    test_name   -- name of the current test run. used for labeling, files, etc
+    lr      -- learning rate for Adam optimizer (default 0.0001)
+    reg     -- regularization parameter (default 0.001)
+    dropout -- dropout percentage (default 0.5)
+    """
     results = []
     models = []
     mats = []
     for idx, fold in enumerate(folds):
         train, test, val = fold
 
-        model = train_model_fold(train, val, model_name, epochs, idx, use_keras=use_keras, kernel=kernel, test_name=test_name, lr=lr, reg=reg, dropout=dropout, model=model_loaded)
+        model = train_model_fold(train, val, model_name, epochs, idx, use_keras=use_keras, kernel=kernel, test_name=test_name, lr=lr, reg=reg, dropout=dropout)
         out = test_model_fold(test, model)
         results.append(out)
         #models.append(model) #removing this bc memory seems to be an issue
@@ -228,15 +329,24 @@ def train_all(folds, model_name, epochs, use_keras=False, kernel=5, test_name='t
         'Person': all_people}
     )
 
-    youden_j = balanced_accuracy_score(all_actual, all_pred_ints, adjusted=True)
-    print('Youden J Statistic:', youden_j)
+    bac = balanced_accuracy_score(all_actual, all_pred_ints, adjusted=True)
+    print('Balanced Accuracy:', youden_j)
 
-    return all_results, youden_j, total_mat, models, mats
+    return all_results, bac, total_mat, models, mats
 
 
 # Creates a heatmap confusion matrix and swarmplot for prediction results
-def display_results(all_results, youden_j, total_mat, mats, name):
-    
+def display_results(all_results, bac, total_mat, mats, name):
+    """Creates a heatmap confusion matrix and swarmplot for prediction results
+
+    Arguments:
+    all_results -- results dictionary from train_all
+    bac         -- balanced accuracy score
+    total_mat   -- confusion matrix with values from all folds
+    mats        -- list of individual confusion matrices from each fold
+    name        -- name of the trial for file naming
+    """
+
     hm.heatmap(total_mat, name, './trials/{}/total.png'.format(name))
     with open('./trials/{}/matrix.txt'.format(name), 'w') as f:
         f.write('Balanced Accuracy: {}\n'.format(youden_j))
@@ -250,8 +360,9 @@ def display_results(all_results, youden_j, total_mat, mats, name):
     f_2.tight_layout()
     plt.savefig('./trials/{}/swarmplot.png'.format(name))
 
-# Trains a model using the given parameters and tests it
 def run_test(args, lr=0.001, reg=0.01, dropout=0.5):
+    """Train and test models using given parameters"""    
+    
     sensors= list(set(args.keep) - set(args.remove))
     allowed_channels = sensors_to_channels(sensors)
     if args.load_data is None:
@@ -296,6 +407,7 @@ if __name__ == '__main__':
     parser.add_argument('-ld', '--load_data', help='Leftover data to load', default=None)
     args = parser.parse_args()
 
+    # Parse window args as ints if not min and max
     if args.beginning != 'min':
         args.beginning = int(args.beginning)
         args.end = int(args.end)
