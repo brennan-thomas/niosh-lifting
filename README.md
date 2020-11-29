@@ -2,6 +2,7 @@
 Detecting lift risk levels using convolutional LSTM neural networks
 
 ## Requirements
+python 3.6<br>
 numpy<br>
 pandas<br>
 scikit-learn<br>
